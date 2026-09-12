@@ -42,7 +42,7 @@ void app_main(void) {
     };
     gpio_config(&io_conf);
 
-    ESP_LOGI(TAG, "=== MediSense Week 1: Lid Sensor Test (ESP-IDF) ===");
+    ESP_LOGI(TAG, "=== MediSense Week 03: Lid Sensor Test (ESP-IDF) ===");
     for (int i = 0; i < NUM_SENSORS; i++) {
         stable_state[i] = gpio_get_level(SENSOR_PINS[i]);
         last_reading[i] = stable_state[i];

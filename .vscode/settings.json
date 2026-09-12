@@ -1,3 +1,4 @@
 {
-    "idf.currentSetup": "/Users/jomcgoat/.espressif/v6.1/esp-idf"
+    "idf.currentSetup": "/Users/jomcgoat/.espressif/v6.1/esp-idf",
+    "cmake.sourceDirectory": "/Users/jomcgoat/Documents/CSCI490/MediSense/firmware-esp32"
 }
