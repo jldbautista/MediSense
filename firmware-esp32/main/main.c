@@ -18,6 +18,7 @@ static const char *COMPARTMENT_NAMES[NUM_SENSORS] = {"Compartment A", "Compartme
 
 #define DEBOUNCE_DELAY_MS 50
 #define POLL_INTERVAL_MS 10
+#define LEVELS_WHEN_CLOSED 0
 
 static int last_reading[NUM_SENSORS];
 static int stable_state[NUM_SENSORS];
@@ -29,7 +30,7 @@ static int64_t now_ms(void) {
 
 static void print_state(int i) {
     ESP_LOGI(TAG, "%s: %s", COMPARTMENT_NAMES[i],
-             stable_state[i] == 0 ? "OPEN" : "CLOSED");
+             stable_state[i] == LEVELS_WHEN_CLOSED ? "CLOSED" : "OPEN");
 }
 
 void app_main(void) {
