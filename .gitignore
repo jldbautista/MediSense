@@ -217,3 +217,24 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .DS_Store
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+
+# --- ESP-IDF ---
+build/
+sdkconfig.old
+
+# --- macOS ---
+.DS_Store
