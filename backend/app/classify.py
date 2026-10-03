@@ -76,4 +76,29 @@ def classify(*, lid_open: bool, compartment: int,
         return "needs_confirmation"
     if now - dose.due_at > LATE_AFTER:
         return "verified_late"
-    return "verified_on_time"
+    return "verified_on_time" 
+from datetime import timedelta as _timedelta 
+
+# WINDOW as a timedelta
+DOSE_WINDOW = WINDOW if isinstance(WINDOW, _timedelta) else _timedelta(minutes=WINDOW)
+
+
+def dose_status(due_at, events, now):
+    """Status of one of today's doses. Pure: no database.
+
+    due_at: timezone-aware datetime the dose is due.
+    events: stored events for this dose's schedule_id inside its window.
+    Returns a stored status (verified_on_time, verified_late, needs_confirmation)
+    or a computed one (missed, due, upcoming). Computed statuses are never stored.
+    """
+    statuses = {e["status"] for e in events}
+    for s in VERIFIED_STATUSES:
+        if s in statuses:
+            return s
+    if "needs_confirmation" in statuses:
+        return "needs_confirmation"
+    if now > due_at + DOSE_WINDOW:
+        return "missed"
+    if now >= due_at - DOSE_WINDOW:
+        return "due"
+    return "upcoming"

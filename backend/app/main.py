@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from .reads import router as reads_router
 
 from fastapi import FastAPI, HTTPException, status
 
@@ -13,6 +14,7 @@ TZ = ZoneInfo("America/Los_Angeles")
 
 app = FastAPI(title="MediSense API", version="0.1.0")
 
+app.include_router(reads_router)
 
 @app.get("/health")
 def health():
