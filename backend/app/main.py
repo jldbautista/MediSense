@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from .reads import router as reads_router
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from .classify import VERIFIED_STATUSES, WINDOW, classify, doses_near, find_due_dose
 from .db import get_client
@@ -13,6 +14,12 @@ from .models import EventIn
 TZ = ZoneInfo("America/Los_Angeles")
 
 app = FastAPI(title="MediSense API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["GET", "POST"],
+)
 
 app.include_router(reads_router)
 
