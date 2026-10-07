@@ -1,7 +1,7 @@
 -- Test schedule rows near the current time (America/Los_Angeles)
 --   Compartment 1 (A): due now          -> opening A now = verified_on_time
 --   Compartment 2 (B): due 45 min ago   -> opening B now = verified_late
--- Write down the ids it returns; need them for cleanup.
+-- Record/write down the ids it returns; need them for cleanup.
 
 with due(comp, t) as (
   values

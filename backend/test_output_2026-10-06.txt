@@ -1,0 +1,42 @@
+MediSense test run: Tue Oct  6 18:04:07 PDT 2026
+Backend: http://localhost:8000
+
+=== 1. B opened, camera says compartment 1 -> expect needs_confirmation (camera disagrees)
+{"id":5,"device_id":"medstation01","schedule_id":20,"expected_compartment":2,"detected_compartment":2,"lid_open":true,"camera_compartment":1,"camera_confidence":0.9,"weight_change":null,"status":"needs_confirmation","scheduled_time":"2026-10-07T00:18:00+00:00","actual_time":"2026-10-07T01:04:07.815714+00:00"}
+HTTP 201
+
+=== 2. B opened, camera says compartment 2 -> expect verified_late
+{"id":6,"device_id":"medstation01","schedule_id":20,"expected_compartment":2,"detected_compartment":2,"lid_open":true,"camera_compartment":2,"camera_confidence":0.9,"weight_change":null,"status":"verified_late","scheduled_time":"2026-10-07T00:18:00+00:00","actual_time":"2026-10-07T01:04:10.131515+00:00"}
+HTTP 201
+
+=== 3. A opened, no camera -> expect verified_on_time (lid-only allowed)
+{"id":7,"device_id":"medstation01","schedule_id":19,"expected_compartment":1,"detected_compartment":1,"lid_open":true,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"verified_on_time","scheduled_time":"2026-10-07T01:03:00+00:00","actual_time":"2026-10-07T01:04:11.523073+00:00"}
+HTTP 201
+
+=== 4. A opened again -> expect unexpected_access (repeat opening)
+{"id":8,"device_id":"medstation01","schedule_id":19,"expected_compartment":1,"detected_compartment":1,"lid_open":true,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"unexpected_access","scheduled_time":"2026-10-07T01:03:00+00:00","actual_time":"2026-10-07T01:04:12.331509+00:00"}
+HTTP 201
+
+=== 5. A lid closed -> expect lid_closed
+{"id":9,"device_id":"medstation01","schedule_id":null,"expected_compartment":null,"detected_compartment":1,"lid_open":false,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"lid_closed","scheduled_time":null,"actual_time":"2026-10-07T01:04:13.356636+00:00"}
+HTTP 201
+
+=== 6. Compartment 3 opened -> expect unexpected_access (no dose due)
+{"id":10,"device_id":"medstation01","schedule_id":null,"expected_compartment":null,"detected_compartment":3,"lid_open":true,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"unexpected_access","scheduled_time":null,"actual_time":"2026-10-07T01:04:13.839007+00:00"}
+HTTP 201
+
+=== 7. Compartment 0 -> expect HTTP 422 (validation)
+{"detail":[{"type":"greater_than_equal","loc":["body","compartment"],"msg":"Input should be greater than or equal to 1","input":0,"ctx":{"ge":1}}]}
+HTTP 422
+
+=== 8. Unknown device -> expect HTTP 404
+{"detail":"Unknown device: nope"}
+HTTP 404
+
+=== 9. GET /api/schedule/today -> expect test B verified_late, test A verified_on_time
+[{"schedule_id":3,"medication":"Medication A","compartment":1,"scheduled_time":"2026-10-06T08:00:00-07:00","status":"missed","event_id":null,"actual_time":null},{"schedule_id":20,"medication":"Medication B","compartment":2,"scheduled_time":"2026-10-06T17:18:00-07:00","status":"verified_late","event_id":6,"actual_time":"2026-10-07T01:04:10.131515+00:00"},{"schedule_id":19,"medication":"Medication A","compartment":1,"scheduled_time":"2026-10-06T18:03:00-07:00","status":"verified_on_time","event_id":7,"actual_time":"2026-10-07T01:04:11.523073+00:00"},{"schedule_id":4,"medication":"Medication B","compartment":2,"scheduled_time":"2026-10-06T20:00:00-07:00","status":"upcoming","event_id":null,"actual_time":null}]
+HTTP 200
+
+=== 10. GET /api/events?limit=10 -> expect the 6 stored events, newest first
+[{"id":10,"device_id":"medstation01","schedule_id":null,"expected_compartment":null,"detected_compartment":3,"lid_open":true,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"unexpected_access","scheduled_time":null,"actual_time":"2026-10-07T01:04:13.839007+00:00"},{"id":9,"device_id":"medstation01","schedule_id":null,"expected_compartment":null,"detected_compartment":1,"lid_open":false,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"lid_closed","scheduled_time":null,"actual_time":"2026-10-07T01:04:13.356636+00:00"},{"id":8,"device_id":"medstation01","schedule_id":19,"expected_compartment":1,"detected_compartment":1,"lid_open":true,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"unexpected_access","scheduled_time":"2026-10-07T01:03:00+00:00","actual_time":"2026-10-07T01:04:12.331509+00:00"},{"id":7,"device_id":"medstation01","schedule_id":19,"expected_compartment":1,"detected_compartment":1,"lid_open":true,"camera_compartment":null,"camera_confidence":null,"weight_change":null,"status":"verified_on_time","scheduled_time":"2026-10-07T01:03:00+00:00","actual_time":"2026-10-07T01:04:11.523073+00:00"},{"id":6,"device_id":"medstation01","schedule_id":20,"expected_compartment":2,"detected_compartment":2,"lid_open":true,"camera_compartment":2,"camera_confidence":0.9,"weight_change":null,"status":"verified_late","scheduled_time":"2026-10-07T00:18:00+00:00","actual_time":"2026-10-07T01:04:10.131515+00:00"},{"id":5,"device_id":"medstation01","schedule_id":20,"expected_compartment":2,"detected_compartment":2,"lid_open":true,"camera_compartment":1,"camera_confidence":0.9,"weight_change":null,"status":"needs_confirmation","scheduled_time":"2026-10-07T00:18:00+00:00","actual_time":"2026-10-07T01:04:07.815714+00:00"}]
+HTTP 200
