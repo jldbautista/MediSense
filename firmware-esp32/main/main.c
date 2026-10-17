@@ -30,6 +30,10 @@ static const int COMPARTMENT_NUMBERS[NUM_SENSORS] = {1, 2};
 #define POLL_INTERVAL_MS 10
 #define LEVELS_WHEN_CLOSED 0
 
+// Re-arm guard: a new OPEN only sends an event if the lid had stayed
+// closed for at least this long first. Measured on B: flicker "closed"
+#define REARM_CLOSED_MS 1000
+
 #define WIFI_WAIT_AT_BOOT_MS 15000
 #define HTTP_TIMEOUT_MS 5000
 #define EVENT_QUEUE_LENGTH 10
@@ -41,6 +45,8 @@ static QueueHandle_t event_queue;
 static int last_reading[NUM_SENSORS];
 static int stable_state[NUM_SENSORS];
 static int64_t last_change_time_ms[NUM_SENSORS];
+static int64_t closed_since_ms[NUM_SENSORS];   // when the lid last became CLOSED
+static int ignored_count[NUM_SENSORS];         // OPENs ignored by the re-arm guard
 
 static int64_t now_ms(void) {
     return esp_timer_get_time() / 1000;
@@ -179,7 +185,8 @@ void app_main(void) {
     };
     gpio_config(&io_conf);
 
-    ESP_LOGI(TAG, "=== MediSense: Lid Sensors + Wi-Fi + HTTP POST ===");
+    ESP_LOGI(TAG, "=== MediSense: Lid Sensors + Wi-Fi + HTTP POST (re-arm %d ms) ===",
+             REARM_CLOSED_MS);
 
     event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(int));
     wifi_init_sta();
@@ -198,6 +205,10 @@ void app_main(void) {
         stable_state[i] = gpio_get_level(SENSOR_PINS[i]);
         last_reading[i] = stable_state[i];
         last_change_time_ms[i] = now_ms();
+        // Treat a lid that is closed at boot as already settled,
+        // so the first real opening always counts.
+        closed_since_ms[i] = now_ms() - REARM_CLOSED_MS;
+        ignored_count[i] = 0;
         print_state(i);
     }
     ESP_LOGI(TAG, "Waiting for lid changes...");
@@ -213,12 +224,24 @@ void app_main(void) {
                 if (reading != stable_state[i]) {
                     stable_state[i] = reading;
                     print_state(i);
+                    int64_t t = now_ms();
 
-                    // Send only on CLOSED -> OPEN.
-                    if (stable_state[i] != LEVELS_WHEN_CLOSED) {
-                        int compartment = COMPARTMENT_NUMBERS[i];
-                        if (xQueueSend(event_queue, &compartment, 0) != pdTRUE) {
-                            ESP_LOGW(TAG, "Event queue full: compartment %d dropped", compartment);
+                    if (stable_state[i] == LEVELS_WHEN_CLOSED) {
+                        // Lid just closed: start timing how long it stays closed.
+                        closed_since_ms[i] = t;
+                    } else {
+                        // CLOSED -> OPEN. Send only if the lid had been closed
+                        // long enough; otherwise it's a flicker or a fumble.
+                        long long closed_for = (long long)(t - closed_since_ms[i]);
+                        if (closed_for >= REARM_CLOSED_MS) {
+                            int compartment = COMPARTMENT_NUMBERS[i];
+                            if (xQueueSend(event_queue, &compartment, 0) != pdTRUE) {
+                                ESP_LOGW(TAG, "Event queue full: compartment %d dropped", compartment);
+                            }
+                        } else {
+                            ignored_count[i]++;
+                            ESP_LOGW(TAG, "%s: OPEN ignored, lid was closed only %lld ms (needs %d). Ignored so far: %d",
+                                     COMPARTMENT_NAMES[i], closed_for, REARM_CLOSED_MS, ignored_count[i]);
                         }
                     }
                 }
