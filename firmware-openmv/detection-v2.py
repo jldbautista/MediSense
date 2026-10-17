@@ -6,16 +6,17 @@ sensor.set_framesize(sensor.QVGA)
 sensor.skip_frames(time=2000)
 sensor.set_auto_gain(False)
 sensor.set_auto_whitebal(False)
+sensor.set_auto_exposure(False)
 
 # ROI Coordinates
 rois = [
-    (20, 22, 83, 189), # Compartment A
-    (109, 14, 102, 202), # Compartment B
+    (48, 42, 77, 146),
+    (208, 42, 77, 146),
 ]
 names = ["A", "B"]
 
-L_DROP = 6    # brightness must drop by at least this much
-B_RISE = 3    # B color channel must rise by at least this much
+B_OPEN = 8     # B must rise above this to switch to OPEN
+B_CLOSE = 4    # B must fall below this to switch back to CLOSED
 
 # ---- Calibration: ALL LIDS CLOSED, hands out of frame ----
 print("Calibrating in 3 sec: keep ALL lids CLOSED, keep hands out of frame")
@@ -48,7 +49,10 @@ while True:
         s = img.get_statistics(roi=roi)
         l_drop = base[i][0] - s.l_mean
         b_rise = s.b_mean - base[i][2]
-        is_open = (l_drop >= L_DROP) and (b_rise >= B_RISE)
+        if prev_open[i]:
+            is_open = b_rise >= B_CLOSE
+        else:
+            is_open = b_rise >= B_OPEN
 
         color = (255, 0, 0) if is_open else (0, 255, 0)
         img.draw_rectangle(roi, color=color)

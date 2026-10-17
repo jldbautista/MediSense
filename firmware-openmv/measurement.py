@@ -9,8 +9,8 @@ sensor.set_auto_whitebal(False)
 
 # ROI Coordinates
 rois = [
-    (20, 22, 83, 189), # Compartment A
-    (109, 14, 102, 202), # Compartment B
+    (48, 42, 77, 146),
+    (208, 42, 77, 146),
 ]
 
 last_print = time.ticks_ms()
