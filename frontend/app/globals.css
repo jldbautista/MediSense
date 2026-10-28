@@ -4,4 +4,48 @@ body {
   background: #ffffff;
   color: #171717;
   font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+@layer components {
+  /* plain bordered tables */
+  .tbl {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .tbl th,
+  .tbl td {
+    border: 1px solid #bbbbbb;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .tbl th {
+    background: #eeeeee;
+    font-weight: bold;
+  }
+
+  /* simple gray buttons */
+  .btn {
+    border: 1px solid #888888;
+    background: #f3f3f3;
+    padding: 3px 10px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .btn:hover {
+    background: #e4e4e4;
+  }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  /* dropdowns */
+  .field {
+    border: 1px solid #888888;
+    background: #ffffff;
+    padding: 1px 4px;
+  }
 }
