@@ -1,16 +1,16 @@
-# MediSense detection v3: AprilTag-based lid detection with sensor windowing.
-#
-# Each lid has a 23 mm TAG36H11 AprilTag on its underside. The tag ID is the
-# compartment number. The tag faces the camera only when the lid is open flat,
-# so: tag seen = OPEN, tag not seen = CLOSED. A hand can hide a tag (missed
-# open) but cannot create one (no false open).
-#
-# Memory: the H7 R2 cannot run find_apriltags() on a 320x240 frame. Instead the
-# sensor runs at VGA (640x480) detail and captures one small window at a time.
+# MediSense detection v3: AprilTag based lid detection with sensor windowing.
+
+# Each lid has a 23 mm TAG36H11 AprilTag on its underside. The tag ID is the compartment number.
+# The tag faces the camera only when the lid is open flat, so: tag seen = OPEN, tag not seen = CLOSED.
+# A hand can hide a tag (missed open) but cannot create one (no false open).
+
+# Memory: the H7 R2 cannot run find_apriltags() on a 320x240 frame.
+# Instead the sensor runs at VGA (640x480) detail and captures one small window at a time.
 # Each scan visits every compartment's window once.
 
 import csi
 import time
+from machine import UART
 
 WINDOWS = {
     1: (52, 160, 240, 160),
@@ -18,9 +18,16 @@ WINDOWS = {
 }
 NAMES = {1: "A", 2: "B"}
 
-MIN_MARGIN = 0.10  # ignore weak detections (OpenMV docs recommend > 0.1)
+MIN_MARGIN = 0.10  # ignore weak detections
 OPEN_SCANS = 2     # tag seen in this many scans in a row -> OPEN
 CLOSE_SCANS = 3    # tag missing in this many scans in a row -> CLOSED
+
+uart = UART(3, baudrate=115200)
+
+
+def send(line):
+    uart.write(line + "\n")
+
 
 csi0 = csi.CSI()
 csi0.reset()
@@ -42,7 +49,7 @@ def scan():
     best = {c: 0.0 for c in WINDOWS}
     for c in WINDOWS:
         csi0.window(WINDOWS[c])
-        csi0.snapshot()       
+        csi0.snapshot()       # discard first frame after a window change
         img = csi0.snapshot()
         for tag in img.find_apriltags():
             if tag.id in WINDOWS and tag.decision_margin >= MIN_MARGIN:
@@ -53,8 +60,8 @@ def scan():
     return best
 
 
-print("=== MediSense detection v3 (AprilTags, windowed) ===")
-print("Compartments:", ", ".join("%s=tag %d" % (NAMES[c], c) for c in WINDOWS))
+print("=== MediSense detection v3 (AprilTags, Windowed) ===")
+print("Compartments:", ", ".join("%s=tag %d" % (NAMES[c], c) for c in sorted(WINDOWS)))
 
 scan_count = 0
 while True:
@@ -72,6 +79,7 @@ while True:
                 is_open[c] = True
                 print("Compartment %s: OPEN   (margin %.2f, width %d px)"
                       % (NAMES[c], best[c], tag_width[c]))
+                send("CAM,%d,OPEN,%.2f" % (c, best[c]))
         else:
             missed_run[c] += 1
             seen_run[c] = 0
@@ -79,7 +87,9 @@ while True:
                 is_open[c] = False
                 print("Compartment %s: CLOSED (peak margin while open %.2f)"
                       % (NAMES[c], peak_margin[c]))
+                send("CAM,%d,CLOSED,%.2f" % (c, peak_margin[c]))
                 peak_margin[c] = 0.0
 
     if scan_count % 20 == 0:
         print("scan time %d ms" % scan_ms)
+        send("HB,%d" % scan_ms)
