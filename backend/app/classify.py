@@ -37,7 +37,7 @@ def doses_near(schedules: list[dict], now: datetime) -> list[Dose]:
     tomorrow, so a window that crosses midnight still matches.
 
     `day_of_week` follows Python's weekday(): 0 = Monday, 6 = Sunday.
-    `scheduled_time` is local wall-clock time in now's timezone.
+    `scheduled_time` is local wall clock time in now's timezone.
     """
     doses = []
     for offset in (-1, 0, 1):
@@ -86,7 +86,7 @@ DOSE_WINDOW = WINDOW if isinstance(WINDOW, _timedelta) else _timedelta(minutes=W
 def dose_status(due_at, events, now):
     """Status of one of today's doses. Pure: no database.
 
-    due_at: timezone-aware datetime the dose is due.
+    due_at: timezone aware datetime the dose is due.
     events: stored events for this dose's schedule_id inside its window.
     Returns a stored status (verified_on_time, verified_late, needs_confirmation)
     or a computed one (missed, due, upcoming). Computed statuses are never stored.

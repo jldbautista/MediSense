@@ -1,17 +1,23 @@
-"""Read-only endpoints for the dashboard: recent events and today's schedule."""
-from datetime import datetime, time
+"""Read only endpoints for the dashboard: recent events, today's schedule
+and the compartments list. All require a logged in user."""
+
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from .auth import require_user
 from .classify import DOSE_WINDOW, dose_status
 from .db import get_client
 
 # Same zone as main.py. Defined here too, because importing it from main.py would be circular (main.py imports this file).
 TZ = ZoneInfo("America/Los_Angeles")
 
-# Every route below gets the /api prefix.
-router = APIRouter(prefix="/api")
+# How far back /api/compartments looks for each compartment's latest activity.
+COMPARTMENT_HISTORY = timedelta(days=30)
+
+# Every route below gets the /api prefix and needs a valid login token.
+router = APIRouter(prefix="/api", dependencies=[Depends(require_user)])
 
 
 @router.get("/events")
@@ -26,6 +32,68 @@ def list_events(limit: int = Query(50, ge=1, le=200)):
         .execute()
         .data
     )
+
+
+@router.get("/compartments")
+def list_compartments():
+    """All compartments in physical order (1 = Sun ... 7 = Sat), each with
+    its latest lid opening and latest camera sighting from the last 30 days.
+
+    Only lid openings are stored (the firmware posts opens only), so there is
+    no current open/closed state here. A camera sighting is any event whose
+    camera_compartment is this compartment, even if a different lid fired.
+    """
+    now = datetime.now(TZ)
+    client = get_client()
+
+    # 1. The physical layout, from the compartments table (migration 003).
+    compartments = (
+        client.table("compartments")
+        .select("compartment, day_of_week, slot, label")
+        .order("compartment")
+        .execute()
+        .data
+    )
+
+    # 2. One query for recent openings, newest first.
+    events = (
+        client.table("medication_events")
+        .select("id, detected_compartment, camera_compartment, camera_confidence, status, actual_time")
+        .eq("lid_open", True)
+        .gte("actual_time", (now - COMPARTMENT_HISTORY).isoformat())
+        .order("actual_time", desc=True)
+        .limit(1000)
+        .execute()
+        .data
+    )
+
+    # 3. Newest first, so the first event seen for a compartment is its latest.
+    last_open = {}
+    last_camera = {}
+    for e in events:
+        last_open.setdefault(e["detected_compartment"], e)
+        if e["camera_compartment"] is not None:
+            last_camera.setdefault(e["camera_compartment"], e)
+
+    # 4. One row per compartment, including ones with no activity.
+    result = []
+    for c in compartments:
+        n = c["compartment"]
+        opened = last_open.get(n)
+        seen = last_camera.get(n)
+        result.append({
+            "compartment": n,
+            "label": c["label"],
+            "day_of_week": c["day_of_week"],  # 0 = Monday ... 6 = Sunday
+            "slot": c["slot"],
+            "is_today": c["day_of_week"] == now.weekday(),
+            "last_opened": opened["actual_time"] if opened else None,  # UTC
+            "last_status": opened["status"] if opened else None,
+            "last_event_id": opened["id"] if opened else None,
+            "camera_last_seen": seen["actual_time"] if seen else None,  # UTC
+            "camera_confidence": seen["camera_confidence"] if seen else None,
+        })
+    return result
 
 
 @router.get("/schedule/today")

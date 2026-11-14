@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { apiFetch, logOut, NotLoggedInError } from "./lib/api";
+import { supabase } from "./lib/supabase";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const TZ = "America/Los_Angeles";
 const POLL_MS = 3000;
 const HIGHLIGHT_MS = 10000;
@@ -12,7 +14,7 @@ const LOG_LINES = 8;
 const STATUS: { [key: string]: { label: string; color: string } } = {
   verified_on_time: { label: "On Time", color: "text-green-800" },
   verified_late: { label: "Late", color: "text-yellow-800" },
-  needs_confirmation: { label: "Needs confirmation", color: "text-orange-800" },
+  needs_confirmation: { label: "Needs Confirmation", color: "text-orange-800" },
   missed: { label: "Missed", color: "text-red-700" },
   unexpected_access: { label: "Unexpected access", color: "text-red-700" },
   due: { label: "Due Now", color: "text-red-700" },
@@ -120,6 +122,7 @@ function scheduleDetail(item: any, sorted: any[]) {
 export default function Home() {
   const [schedule, setSchedule] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
+  const [compartmentList, setCompartmentList] = useState<any[]>([]);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState("");
   const [todayLabel, setTodayLabel] = useState("");
@@ -141,22 +144,33 @@ export default function Home() {
 
   const loading = useRef(false);
 
+  // Email of the logged-in user, shown in the header
+  const [userEmail, setUserEmail] = useState("");
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setUserEmail(data.session?.user.email ?? ""));
+  }, []);
+
   const loadData = useCallback(async () => {
     if (loading.current) return;
     loading.current = true;
     const start = performance.now();
 
     try {
-      // Both requests run at the same time
-      const [scheduleRes, eventsRes] = await Promise.all([
-        fetch(API + "/api/schedule/today"),
-        fetch(API + "/api/events?limit=" + limit),
+      // All three requests run at the same time
+      const [scheduleRes, eventsRes, compartmentsRes] = await Promise.all([
+        apiFetch("/api/schedule/today"),
+        apiFetch("/api/events?limit=" + limit),
+        apiFetch("/api/compartments"),
       ]);
-      if (!scheduleRes.ok || !eventsRes.ok) {
-        throw new Error("Backend returned " + scheduleRes.status + " / " + eventsRes.status);
+      if (!scheduleRes.ok || !eventsRes.ok || !compartmentsRes.ok) {
+        throw new Error(
+          "Backend returned " +
+            scheduleRes.status + " / " + eventsRes.status + " / " + compartmentsRes.status
+        );
       }
       const newSchedule = await scheduleRes.json();
       const newEvents = await eventsRes.json();
+      const newCompartments = await compartmentsRes.json();
 
       // Highlight events that arrived since the last refresh
       const newestId = newEvents.length ? Math.max(...newEvents.map((e: any) => e.id)) : null;
@@ -171,6 +185,7 @@ export default function Home() {
 
       setSchedule(newSchedule);
       setEvents(newEvents);
+      setCompartmentList(newCompartments);
       setError("");
       setResponseMs(Math.round(performance.now() - start));
       setLastUpdated(new Date().toLocaleTimeString("en-US", { timeZone: TZ }));
@@ -184,6 +199,7 @@ export default function Home() {
         })
       );
     } catch (err) {
+      if (err instanceof NotLoggedInError) return; // on the way to /login
       setError(
         err instanceof TypeError ? "Could not connect to backend. Is uvicorn running?" : String(err)
       );
@@ -224,10 +240,11 @@ export default function Home() {
     .map((s) => ({ ...s, key: s.schedule_id + "-" + s.status }))
     .filter((s) => !dismissed.includes(s.key));
 
-  // Compartments that appear in today's schedule
-  const compartments = Array.from(new Set(schedule.map((s) => s.compartment))).sort(
-    (a: any, b: any) => a - b
-  );
+  // Day label for a compartment number, e.g. 6 -> "6 (Fri)"
+  const withDay = (n: number) => {
+    const c = compartmentList.find((x) => x.compartment === n);
+    return c ? n + " (" + c.label + ")" : String(n);
+  };
 
   const lastCamera = sorted.find((e) => e.camera_compartment != null);
 
@@ -264,6 +281,15 @@ export default function Home() {
         <button onClick={loadData} className="btn">
           Refresh
         </button>
+        <Link href="/schedules" className="btn">
+          Schedules
+        </Link>
+        <span className="ml-auto">
+          {userEmail && userEmail + " "}
+          <button onClick={logOut} className="btn">
+            Log Out
+          </button>
+        </span>
       </div>
 
       {error && (
@@ -278,7 +304,7 @@ export default function Home() {
         >
           <span className="flex-1">
             <b className="text-red-700">{a.status === "due" ? "DUE NOW:" : "MISSED:"}</b>{" "}
-            {a.medication} (Compartment {a.compartment}) was scheduled at{" "}
+            {a.medication} in Compartment {withDay(a.compartment)} was scheduled at{" "}
             {formatTime(a.scheduled_time)} and has NOT been opened.
           </span>
           <button onClick={() => setDismissed([...dismissed, a.key])} className="btn">
@@ -317,7 +343,7 @@ export default function Home() {
                   <tr key={item.schedule_id}>
                     <td className="whitespace-nowrap">{formatTime(item.scheduled_time)}</td>
                     <td>{item.medication}</td>
-                    <td>{item.compartment}</td>
+                    <td>{withDay(item.compartment)}</td>
                     <td className="whitespace-nowrap">
                       <Status status={item.status} />
                     </td>
@@ -338,50 +364,58 @@ export default function Home() {
         {/* Left column */}
         <div className="min-w-0 flex-[1_1_420px]">
           <h2 className="mb-2 text-[17px] font-bold">Compartments</h2>
-          {compartments.length === 0 ? (
-            <p className="text-gray-600">No compartments in today&apos;s schedule.</p>
+          {compartmentList.length === 0 ? (
+            <p className="text-gray-600">No compartments set up.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="tbl">
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Lid (Last Reported)</th>
-                    <th>Camera</th>
+                    <th>Day</th>
                     <th>Last Opened</th>
+                    <th>Result</th>
+                    <th>Camera</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {compartments.map((c: any) => {
-                    const latest = sorted.find((e) => e.detected_compartment === c);
-                    const opened = sorted.find(
-                      (e) =>
-                        e.detected_compartment === c &&
-                        e.status !== "lid_closed" &&
-                        isToday(e.actual_time)
-                    );
-                    const cam = sorted.find((e) => e.camera_compartment === c);
-                    return (
-                      <tr key={c}>
-                        <td>{c}</td>
-                        <td>{!latest ? "no data" : latest.status === "lid_closed" ? "closed" : "open"}</td>
-                        <td>
-                          {cam
-                            ? "seen " +
-                              formatTime(cam.actual_time) +
-                              (cam.camera_confidence != null
-                                ? " (" + Math.round(cam.camera_confidence * 100) + "%)"
-                                : "")
-                            : "no activity"}
-                        </td>
-                        <td>{opened ? formatTime(opened.actual_time) : "not today"}</td>
-                      </tr>
-                    );
-                  })}
+                  {compartmentList.map((c: any) => (
+                    <tr key={c.compartment} className={c.is_today ? "bg-yellow-50 font-bold" : ""}>
+                      <td>{c.compartment}</td>
+                      <td>
+                        {c.label}
+                        {c.is_today && " (Today)"}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        {!c.last_opened
+                          ? "Never"
+                          : isToday(c.last_opened)
+                            ? formatTime(c.last_opened)
+                            : formatDateTime(c.last_opened)}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        {c.last_status ? <Status status={c.last_status} /> : "-"}
+                      </td>
+                      <td>
+                        {c.camera_last_seen
+                          ? "Seen " +
+                            (isToday(c.camera_last_seen)
+                              ? formatTime(c.camera_last_seen)
+                              : formatDateTime(c.camera_last_seen)) +
+                            (c.camera_confidence != null
+                              ? " (" + Math.round(c.camera_confidence * 100) + "%)"
+                              : "")
+                          : "No Reading"}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           )}
+          <p className="mt-1.5 text-xs text-gray-600">
+            Last 30 days. Only openings are reported, so there is no live open/closed state yet.
+          </p>
 
           <h2 className="mb-2 mt-6 text-[17px] font-bold">Recent Activity</h2>
           {sorted.length === 0 ? (
@@ -405,20 +439,23 @@ export default function Home() {
         {/* Right column */}
         <div className="min-w-0 flex-[1_1_300px]">
           <h2 className="mb-2 text-[17px] font-bold">Camera</h2>
-          {/* TODO: show a real snapshot once the backend has an image endpoint */}
-          <div className="flex min-h-[150px] flex-wrap items-center justify-center gap-3 border border-gray-500 bg-gray-300 p-3">
-            {compartments.length === 0 && <span className="text-gray-700">No Regions Set</span>}
-            {compartments.map((c: any) => {
-              const recent = lastCamera && lastCamera.camera_compartment === c && isNew(lastCamera);
+          {/* One box per AprilTag (tag ID = compartment). No image: the camera has no Wi-Fi. */}
+          <div className="flex min-h-[90px] flex-wrap items-center justify-center gap-2 border border-gray-500 bg-gray-300 p-3">
+            {compartmentList.length === 0 && <span className="text-gray-700">No Compartments Set</span>}
+            {compartmentList.map((c: any) => {
+              const recent =
+                lastCamera && lastCamera.camera_compartment === c.compartment && isNew(lastCamera);
               return (
                 <div
-                  key={c}
+                  key={c.compartment}
                   className={
-                    "h-24 w-24 border-2 border-dashed border-gray-800 p-1 text-xs " +
-                    (recent ? "bg-yellow-100" : "")
+                    "h-16 w-16 border-2 border-dashed border-gray-800 p-1 text-xs " +
+                    (recent ? "bg-yellow-100" : c.camera_last_seen ? "bg-white" : "")
                   }
                 >
-                  ROI {c}
+                  Tag {c.compartment}
+                  <br />
+                  {c.label}
                 </div>
               );
             })}
