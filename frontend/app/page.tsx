@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const TZ = "America/Los_Angeles";
@@ -272,6 +273,9 @@ export default function Home() {
         <button onClick={loadData} className="btn">
           Refresh
         </button>
+        <Link href="/schedules" className="btn">
+          Schedules
+        </Link>
       </div>
 
       {error && (
@@ -286,7 +290,7 @@ export default function Home() {
         >
           <span className="flex-1">
             <b className="text-red-700">{a.status === "due" ? "DUE NOW:" : "MISSED:"}</b>{" "}
-            {a.medication} (Compartment {withDay(a.compartment)}) was scheduled at{" "}
+            {a.medication} in Compartment {withDay(a.compartment)} was scheduled at{" "}
             {formatTime(a.scheduled_time)} and has NOT been opened.
           </span>
           <button onClick={() => setDismissed([...dismissed, a.key])} className="btn">

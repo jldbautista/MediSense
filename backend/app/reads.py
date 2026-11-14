@@ -1,4 +1,4 @@
-"""Read-only endpoints for the dashboard: recent events, today's schedule
+"""Read only endpoints for the dashboard: recent events, today's schedule
 and the compartments list."""
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
