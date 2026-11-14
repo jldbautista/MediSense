@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch, logOut, NotLoggedInError } from "../lib/api";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const NEW_MED = "new";
 const CONNECT_MSG = "Could not connect to backend. Is uvicorn running?";
 
@@ -35,7 +35,7 @@ async function errorText(res: Response) {
 }
 
 async function send(method: string, path: string, body?: object) {
-  const res = await fetch(API + path, {
+  const res = await apiFetch(path, {
     method,
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -45,6 +45,7 @@ async function send(method: string, path: string, body?: object) {
 }
 
 function messageOf(err: unknown) {
+  if (err instanceof NotLoggedInError) return ""; // on the way to /login
   return err instanceof TypeError ? CONNECT_MSG : err instanceof Error ? err.message : String(err);
 }
 
@@ -128,7 +129,7 @@ export default function SchedulesPage() {
           new_time: time,
           days,
         });
-        setMessage("Dose Updated.");
+        setMessage("Dose updated.");
       } else {
         let medId = Number(medChoice);
         if (medChoice === NEW_MED) {
@@ -168,7 +169,7 @@ export default function SchedulesPage() {
       if (editing && editing.medication_id === dose.medication_id && editing.time === dose.time) {
         resetForm();
       }
-      setMessage("Dose Deleted.");
+      setMessage("Dose deleted.");
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -187,6 +188,9 @@ export default function SchedulesPage() {
           Dashboard
         </Link>
         <span>Schedules</span>
+        <button onClick={logOut} className="btn ml-auto">
+          Log Out
+        </button>
       </div>
 
       {loadError && (
@@ -212,7 +216,7 @@ export default function SchedulesPage() {
                     {m.display_name}
                   </option>
                 ))}
-                <option value={NEW_MED}>+ New Medication</option>
+                <option value={NEW_MED}>+ New medication</option>
               </select>
             </label>
             {medChoice === NEW_MED && !editing && (

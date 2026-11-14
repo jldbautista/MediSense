@@ -1,22 +1,15 @@
-"""Schedule editor endpoints: medications and schedules.
-
-A "dose" on the editor page is one medication at one time on one or more
-days. In the database that is one medication_schedules row per day, each in
-that day's compartment (looked up from the compartments table, migration
-003). The page never sends a compartment number, so it can't pick the wrong
-one, and the composite foreign key would reject it.
-
-A dose group is identified by (medication_id, time). Editing a group keeps
-the rows for days that stay, so past events stay linked to their schedule."""
+"""Schedule editor endpoints: medications and schedules."""
 
 import datetime as dt
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from .auth import require_user
 from .db import get_client
 from .models import DoseIn, DoseUpdate, MedicationIn
 
-router = APIRouter(prefix="/api")
+# Every route below gets the /api prefix and needs a valid login token.
+router = APIRouter(prefix="/api", dependencies=[Depends(require_user)])
 
 
 def hhmm(t) -> str:
@@ -99,7 +92,7 @@ def list_medications():
 @router.post("/medications", status_code=status.HTTP_201_CREATED)
 def create_medication(med: MedicationIn):
     client = get_client()
-    # Compare names in Python (case insensitive) rather than with ilike,
+    # Compare names in Python (case-insensitive) rather than with ilike,
     # where % or _ in a name would act as wildcards.
     names = client.table("medications").select("display_name").execute().data
     if any(n["display_name"].lower() == med.display_name.lower() for n in names):

@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { apiFetch, logOut, NotLoggedInError } from "./lib/api";
+import { supabase } from "./lib/supabase";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const TZ = "America/Los_Angeles";
 const POLL_MS = 3000;
 const HIGHLIGHT_MS = 10000;
@@ -143,6 +144,12 @@ export default function Home() {
 
   const loading = useRef(false);
 
+  // Email of the logged-in user, shown in the header
+  const [userEmail, setUserEmail] = useState("");
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setUserEmail(data.session?.user.email ?? ""));
+  }, []);
+
   const loadData = useCallback(async () => {
     if (loading.current) return;
     loading.current = true;
@@ -151,9 +158,9 @@ export default function Home() {
     try {
       // All three requests run at the same time
       const [scheduleRes, eventsRes, compartmentsRes] = await Promise.all([
-        fetch(API + "/api/schedule/today"),
-        fetch(API + "/api/events?limit=" + limit),
-        fetch(API + "/api/compartments"),
+        apiFetch("/api/schedule/today"),
+        apiFetch("/api/events?limit=" + limit),
+        apiFetch("/api/compartments"),
       ]);
       if (!scheduleRes.ok || !eventsRes.ok || !compartmentsRes.ok) {
         throw new Error(
@@ -192,6 +199,7 @@ export default function Home() {
         })
       );
     } catch (err) {
+      if (err instanceof NotLoggedInError) return; // on the way to /login
       setError(
         err instanceof TypeError ? "Could not connect to backend. Is uvicorn running?" : String(err)
       );
@@ -276,6 +284,12 @@ export default function Home() {
         <Link href="/schedules" className="btn">
           Schedules
         </Link>
+        <span className="ml-auto">
+          {userEmail && userEmail + " "}
+          <button onClick={logOut} className="btn">
+            Log Out
+          </button>
+        </span>
       </div>
 
       {error && (

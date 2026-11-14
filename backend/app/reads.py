@@ -1,10 +1,12 @@
 """Read only endpoints for the dashboard: recent events, today's schedule
-and the compartments list."""
+and the compartments list. All require a logged in user."""
+
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from .auth import require_user
 from .classify import DOSE_WINDOW, dose_status
 from .db import get_client
 
@@ -14,8 +16,9 @@ TZ = ZoneInfo("America/Los_Angeles")
 # How far back /api/compartments looks for each compartment's latest activity.
 COMPARTMENT_HISTORY = timedelta(days=30)
 
-# Every route below gets the /api prefix.
-router = APIRouter(prefix="/api")
+# Every route below gets the /api prefix and needs a valid login token.
+router = APIRouter(prefix="/api", dependencies=[Depends(require_user)])
+
 
 @router.get("/events")
 def list_events(limit: int = Query(50, ge=1, le=200)):
