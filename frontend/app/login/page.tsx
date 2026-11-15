@@ -1,4 +1,5 @@
 "use client";
+import Image from "next/image";
 
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
@@ -31,7 +32,16 @@ export default function LoginPage() {
 
   return (
     <main className="mx-auto w-full max-w-[420px] px-4 pb-10 pt-4">
-      <h1 className="border-b-2 border-gray-800 pb-2 text-2xl font-bold">MediSense</h1>
+      <h1 className="flex justify-center border-b-2 border-gray-800 pb-2">
+        <Image
+          src="/medisense-horizontal-color.svg"
+          alt="MediSense"
+          width={276}
+          height={56}
+          priority
+          unoptimized
+        />
+      </h1>
       <h2 className="mb-2 mt-6 text-[17px] font-bold">Log In</h2>
 
       <form onSubmit={logIn} className="border border-gray-400 bg-gray-50 p-3 text-[14px]">
@@ -67,12 +77,18 @@ export default function LoginPage() {
         </div>
       </form>
 
-      <p className="mt-3 text-xs text-gray-600">
-        Accounts are created by the administrator in Supabase. There is no sign up page.
+      <p className="mt-4 text-xs text-center text-gray-600">
+        Accounts are created by the administrator in Supabase.
+      </p>
+      <p className="text-xs text-center text-gray-600">
+        There is no sign up page.
       </p>
 
-      <p className="mt-8 border-t border-gray-400 pt-2 text-xs text-gray-600">
-        MediSense, Joseph Lorenzo Bautista Capstone Prototype. Not a Medical Device.
+      <p className="mt-4 border-t border-gray-400 pt-2 text-xs text-center text-gray-600">
+        MediSense, Joseph Lorenzo Bautista Capstone Prototype.
+      </p>
+      <p className="text-xs text-center text-gray-600">
+        Not a Medical Device.
       </p>
     </main>
   );

@@ -1,4 +1,5 @@
 "use client";
+import Image from "next/image";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -262,7 +263,16 @@ export default function Home() {
   return (
     <main className="mx-auto w-full max-w-[980px] px-4 pb-10 pt-4">
       {/* Header */}
-      <h1 className="border-b-2 border-gray-800 pb-2 text-2xl font-bold">MediSense</h1>
+      <h1 className="border-b-2 border-gray-800 pb-2">
+          <Image
+            src="/medisense-horizontal-color.svg"
+            alt="MediSense"
+            width={276}
+            height={56}
+            priority
+            unoptimized
+          />
+        </h1>
 
       <div className="mt-2 flex flex-wrap items-center gap-3 text-[13px] text-gray-700">
         <span>
