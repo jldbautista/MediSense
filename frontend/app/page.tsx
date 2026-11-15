@@ -16,7 +16,7 @@ const STATUS: { [key: string]: { label: string; color: string } } = {
   verified_late: { label: "Late", color: "text-yellow-800" },
   needs_confirmation: { label: "Needs Confirmation", color: "text-orange-800" },
   missed: { label: "Missed", color: "text-red-700" },
-  unexpected_access: { label: "Unexpected access", color: "text-red-700" },
+  unexpected_access: { label: "Unexpected Access", color: "text-red-700" },
   due: { label: "Due Now", color: "text-red-700" },
   upcoming: { label: "Upcoming", color: "text-gray-600" },
   lid_closed: { label: "Lid Closed", color: "text-gray-600" },
@@ -405,7 +405,7 @@ export default function Home() {
                             (c.camera_confidence != null
                               ? " (" + Math.round(c.camera_confidence * 100) + "%)"
                               : "")
-                          : "No Reading"}
+                          : "no reading"}
                       </td>
                     </tr>
                   ))}
