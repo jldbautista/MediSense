@@ -21,6 +21,7 @@ const STATUS: { [key: string]: { label: string; color: string } } = {
   due: { label: "Due Now", color: "text-red-700" },
   upcoming: { label: "Upcoming", color: "text-gray-600" },
   lid_closed: { label: "Lid Closed", color: "text-gray-600" },
+  device_offline: { label: "Station Offline", color: "text-red-700" },
 };
 
 function statusLabel(status: string) {
@@ -56,6 +57,11 @@ function formatDuration(ms: number) {
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
   return h > 0 ? h + "h " + m + "m" : m + "m";
+}
+
+// "3h 12m" from seconds (station uptime)
+function formatUptime(seconds: number) {
+  return formatDuration(seconds * 1000);
 }
 
 function isToday(iso: string) {
@@ -139,6 +145,9 @@ export default function Home() {
   // Acknowledge is saved there too, so it survives reloads and other devices.
   const [alerts, setAlerts] = useState<any[]>([]);
 
+  // Station status from the ESP32 heartbeat (GET /api/device)
+  const [device, setDevice] = useState<any | null>(null);
+
   // "Due now" reminders the user hid in this tab (reminders aren't stored; back after reload)
   const [hiddenReminders, setHiddenReminders] = useState<number[]>([]);
 
@@ -161,24 +170,26 @@ export default function Home() {
     const start = performance.now();
 
     try {
-      // All four requests run at the same time
-      const [scheduleRes, eventsRes, compartmentsRes, alertsRes] = await Promise.all([
+      // All five requests run at the same time
+      const [scheduleRes, eventsRes, compartmentsRes, alertsRes, deviceRes] = await Promise.all([
         apiFetch("/api/schedule/today"),
         apiFetch("/api/events?limit=" + limit),
         apiFetch("/api/compartments"),
         apiFetch("/api/alerts"),
+        apiFetch("/api/device"),
       ]);
-      if (!scheduleRes.ok || !eventsRes.ok || !compartmentsRes.ok || !alertsRes.ok) {
+      if (!scheduleRes.ok || !eventsRes.ok || !compartmentsRes.ok || !alertsRes.ok || !deviceRes.ok) {
         throw new Error(
           "Backend returned " +
             scheduleRes.status + " / " + eventsRes.status + " / " +
-            compartmentsRes.status + " / " + alertsRes.status
+            compartmentsRes.status + " / " + alertsRes.status + " / " + deviceRes.status
         );
       }
       const newSchedule = await scheduleRes.json();
       const newEvents = await eventsRes.json();
       const newCompartments = await compartmentsRes.json();
       const newAlerts = await alertsRes.json();
+      const newDevice = await deviceRes.json();
 
       // Highlight events that arrived since the last refresh
       const newestId = newEvents.length ? Math.max(...newEvents.map((e: any) => e.id)) : null;
@@ -195,6 +206,7 @@ export default function Home() {
       setEvents(newEvents);
       setCompartmentList(newCompartments);
       setAlerts(newAlerts);
+      setDevice(newDevice);
       setError("");
       setResponseMs(Math.round(performance.now() - start));
       setLastUpdated(new Date().toLocaleTimeString("en-US", { timeZone: TZ }));
@@ -268,6 +280,12 @@ export default function Home() {
   };
 
   const lastCamera = sorted.find((e) => e.camera_compartment != null);
+
+  // Live lid state from the heartbeat: "Open", "Closed", or null when the station is offline
+  const lidNow = (n: number): string | null => {
+    if (!device || !device.online || !device.lids_open) return null;
+    return device.lids_open.includes(n) ? "Open" : "Closed";
+  };
 
   // Event filters (full log)
   const statusOptions = Array.from(new Set(events.map((e) => e.status)));
@@ -422,6 +440,7 @@ export default function Home() {
                   <tr>
                     <th>#</th>
                     <th>Day</th>
+                    <th>Lid Now</th>
                     <th>Last Opened</th>
                     <th>Result</th>
                     <th>Camera</th>
@@ -434,6 +453,13 @@ export default function Home() {
                       <td>
                         {c.label}
                         {c.is_today && " (Today)"}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        {lidNow(c.compartment) === "Open" ? (
+                          <b className="text-orange-800">Open</b>
+                        ) : (
+                          lidNow(c.compartment) ?? <span className="text-gray-600">-</span>
+                        )}
                       </td>
                       <td className="whitespace-nowrap">
                         {!c.last_opened
@@ -463,7 +489,8 @@ export default function Home() {
             </div>
           )}
           <p className="mt-1.5 text-xs text-gray-600">
-            Last 30 days. Only openings are reported, so there is no live open/closed state yet.
+            Lid Now comes from the station heartbeat (every 30 s), so it can be up to 30 s
+            behind. Shown as &quot;-&quot; while the station is offline. Other columns: last 30 days.
           </p>
 
           <h2 className="mb-2 mt-6 text-[17px] font-bold">Recent Activity</h2>
@@ -539,9 +566,60 @@ export default function Home() {
                 <td>{lastCamera ? formatDateTime(lastCamera.actual_time) : "None Yet"}</td>
               </tr>
               <tr>
-                {/* TODO: needs a device status endpoint (heartbeat from the ESP32) */}
-                <td>ESP32 / OpenMV</td>
-                <td className="text-gray-600">Not Reported Yet</td>
+                <td>Station (ESP32)</td>
+                <td>
+                  {!device || !device.reported ? (
+                    <span className="text-gray-600">Not Reported Yet</span>
+                  ) : device.online ? (
+                    <>
+                      <b className="text-green-800">Online</b>{" "}
+                      <span className="text-xs text-gray-600">
+                        (heartbeat {device.seconds_since} s ago)
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <b className="text-red-700">Offline</b>{" "}
+                      <span className="text-xs text-gray-600">
+                        (last heartbeat {formatDateTime(device.last_heartbeat)})
+                      </span>
+                    </>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td>Camera (OpenMV)</td>
+                <td>
+                  {!device || !device.online || device.camera_link == null ? (
+                    <span className="text-gray-600">-</span>
+                  ) : device.camera_link ? (
+                    <>
+                      <b className="text-green-800">Camera Link Up</b>
+                      {device.camera_scan_ms != null && (
+                        <span className="text-xs text-gray-600"> (scan {device.camera_scan_ms} ms)</span>
+                      )}
+                    </>
+                  ) : (
+                    <b className="text-red-700">Camera Link Lost</b>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td>WiFi Signal</td>
+                <td>
+                  {device && device.online && device.wifi_rssi != null
+                    ? device.wifi_rssi + " dBm"
+                    : "-"}
+                </td>
+              </tr>
+              <tr>
+                <td>Uptime / Firmware</td>
+                <td>
+                  {device && device.online && device.uptime_s != null
+                    ? formatUptime(device.uptime_s)
+                    : "-"}
+                  {device?.firmware_version && " / v" + device.firmware_version}
+                </td>
               </tr>
             </tbody>
           </table>

@@ -1,4 +1,9 @@
 """Alerts endpoints (migration 004) and the helper POST /api/events uses.
+
+GET  /api/alerts             open alerts, newest first. First creates any
+                             missing "missed" and "device_offline" alerts
+                             (on request: no timer).
+POST /api/alerts/{id}/ack    marks one alert acknowledged (time + user email).
 """
 
 import logging
@@ -19,6 +24,7 @@ from .alert_rules import (
 from .auth import require_user
 from .classify import DOSE_WINDOW
 from .db import get_client
+from .device_rules import is_online, offline_message
 
 TZ = ZoneInfo("America/Los_Angeles")
 OPEN_LIMIT = 50
@@ -135,6 +141,33 @@ def sync_missed(db, now: datetime) -> int:
     return created
 
 
+# ---- Device offline alerts, created on request ----
+
+def sync_device_offline(db, now: datetime) -> int:
+    """Create a device_offline alert for every station whose heartbeats stopped
+    (device_rules.OFFLINE_AFTER). due_at stores the last heartbeat time, so each
+    outage gets exactly one alert (unique index from migration 005). A device
+    that has never sent a heartbeat gets no alert (not set up yet)."""
+    rows = (
+        db.table("devices")
+        .select("id, last_heartbeat")
+        .not_.is_("last_heartbeat", "null")
+        .execute()
+        .data
+    )
+    created = 0
+    for d in rows:
+        if is_online(d["last_heartbeat"], now):
+            continue
+        if insert_once(db, {
+            "type": "device_offline",
+            "due_at": d["last_heartbeat"],
+            "message": offline_message(d["id"], d["last_heartbeat"], TZ),
+        }):
+            created += 1
+    return created
+
+
 # ---- Endpoints ----
 
 @router.get("", dependencies=[Depends(require_user)])
@@ -146,6 +179,10 @@ def list_alerts():
     except Exception:
         # Still show the alerts we already have; the next refresh tries again.
         log.exception("Missed-alert check failed")
+    try:
+        sync_device_offline(db, datetime.now(TZ))
+    except Exception:
+        log.exception("Device-offline check failed")
     return (
         db.table("alerts")
         .select("*")

@@ -10,6 +10,7 @@ from .alerts import create_event_alert
 from .alerts import router as alerts_router
 from .classify import VERIFIED_STATUSES, WINDOW, classify, doses_near, find_due_dose
 from .db import get_client
+from .devices import router as devices_router
 from .models import EventIn
 from .reads import router as reads_router
 from .schedules import router as schedules_router
@@ -28,6 +29,7 @@ app.add_middleware(
 app.include_router(reads_router)
 app.include_router(schedules_router)
 app.include_router(alerts_router)
+app.include_router(devices_router)
 
 
 @app.get("/health")
