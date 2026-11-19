@@ -9,7 +9,7 @@ Rules:
   - No due dose for this compartment   -> unexpected_access
   - Dose already verified in window    -> unexpected_access (repeat opening)
   - Camera reports a different compartment -> needs_confirmation
-  - Camera missing (no UART link yet)  -> verified if ALLOW_LID_ONLY_VERIFIED
+  - No camera reading  -> needs confirmation and verified only if ALLOW_LID_ONLY_VERIFIED
   - Verified: on time up to 30 min after the dose, late from 30 to 60 min.
 """
 
@@ -18,7 +18,7 @@ from datetime import datetime, time, timedelta
 
 WINDOW = timedelta(minutes=60)
 LATE_AFTER = timedelta(minutes=30)
-ALLOW_LID_ONLY_VERIFIED = True  # set False once the camera reports reliably
+ALLOW_LID_ONLY_VERIFIED = False  # set False once the camera reports reliably
 
 VERIFIED_STATUSES = ("verified_on_time", "verified_late")
 
