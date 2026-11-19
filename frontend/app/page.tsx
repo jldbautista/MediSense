@@ -135,8 +135,12 @@ export default function Home() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [compartmentFilter, setCompartmentFilter] = useState("all");
 
-  // Alerts the user acknowledged (cleared on page reload)
-  const [dismissed, setDismissed] = useState<string[]>([]);
+  // Alerts stored in the backend (missed, unexpected access, needs confirmation).
+  // Acknowledge is saved there too, so it survives reloads and other devices.
+  const [alerts, setAlerts] = useState<any[]>([]);
+
+  // "Due now" reminders the user hid in this tab (reminders aren't stored; back after reload)
+  const [hiddenReminders, setHiddenReminders] = useState<number[]>([]);
 
   // Highlights new events
   const [highlightAbove, setHighlightAbove] = useState<number | null>(null);
@@ -145,7 +149,7 @@ export default function Home() {
 
   const loading = useRef(false);
 
-  // Email of the logged-in user, shown in the header
+  // Email of the logged in user, shown in the header
   const [userEmail, setUserEmail] = useState("");
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setUserEmail(data.session?.user.email ?? ""));
@@ -157,21 +161,24 @@ export default function Home() {
     const start = performance.now();
 
     try {
-      // All three requests run at the same time
-      const [scheduleRes, eventsRes, compartmentsRes] = await Promise.all([
+      // All four requests run at the same time
+      const [scheduleRes, eventsRes, compartmentsRes, alertsRes] = await Promise.all([
         apiFetch("/api/schedule/today"),
         apiFetch("/api/events?limit=" + limit),
         apiFetch("/api/compartments"),
+        apiFetch("/api/alerts"),
       ]);
-      if (!scheduleRes.ok || !eventsRes.ok || !compartmentsRes.ok) {
+      if (!scheduleRes.ok || !eventsRes.ok || !compartmentsRes.ok || !alertsRes.ok) {
         throw new Error(
           "Backend returned " +
-            scheduleRes.status + " / " + eventsRes.status + " / " + compartmentsRes.status
+            scheduleRes.status + " / " + eventsRes.status + " / " +
+            compartmentsRes.status + " / " + alertsRes.status
         );
       }
       const newSchedule = await scheduleRes.json();
       const newEvents = await eventsRes.json();
       const newCompartments = await compartmentsRes.json();
+      const newAlerts = await alertsRes.json();
 
       // Highlight events that arrived since the last refresh
       const newestId = newEvents.length ? Math.max(...newEvents.map((e: any) => e.id)) : null;
@@ -187,6 +194,7 @@ export default function Home() {
       setSchedule(newSchedule);
       setEvents(newEvents);
       setCompartmentList(newCompartments);
+      setAlerts(newAlerts);
       setError("");
       setResponseMs(Math.round(performance.now() - start));
       setLastUpdated(new Date().toLocaleTimeString("en-US", { timeZone: TZ }));
@@ -235,11 +243,23 @@ export default function Home() {
   const missed = schedule.filter((s) => s.status === "missed").length;
   const remaining = schedule.filter((s) => s.status === "upcoming" || s.status === "due");
 
-  // Alerts: anything due now or missed that hasn't been acknowledged
-  const alerts = schedule
-    .filter((s) => s.status === "due" || s.status === "missed")
-    .map((s) => ({ ...s, key: s.schedule_id + "-" + s.status }))
-    .filter((s) => !dismissed.includes(s.key));
+  // Reminders: today's doses that are due now and not taken yet (computed, not stored)
+  const reminders = schedule.filter(
+    (s) => s.status === "due" && !hiddenReminders.includes(s.schedule_id)
+  );
+
+  // Acknowledge one stored alert. Hidden right away; restored by the next refresh if it failed.
+  const acknowledge = async (id: number) => {
+    setAlerts((current) => current.filter((a) => a.id !== id));
+    try {
+      const res = await apiFetch("/api/alerts/" + id + "/ack", { method: "POST" });
+      if (!res.ok) throw new Error("Acknowledge failed (backend returned " + res.status + ")");
+    } catch (err) {
+      if (err instanceof NotLoggedInError) return;
+      setError(String(err));
+      loadData();
+    }
+  };
 
   // Day label for a compartment number, e.g. 6 -> "6 (Fri)"
   const withDay = (n: number) => {
@@ -306,18 +326,37 @@ export default function Home() {
         <p className="mt-3 border-2 border-red-700 bg-red-50 px-3 py-2 text-red-800">{error}</p>
       )}
 
-      {/* Alerts */}
+      {/* Reminders: due now (computed from today's schedule, not stored) */}
+      {reminders.map((r) => (
+        <div
+          key={"due-" + r.schedule_id}
+          className="mt-3 flex flex-wrap items-center gap-3 border-2 border-yellow-600 bg-yellow-50 px-3 py-2"
+        >
+          <span className="flex-1">
+            <b className="text-yellow-800">DUE NOW:</b> {r.medication} in Compartment{" "}
+            {withDay(r.compartment)} is scheduled at {formatTime(r.scheduled_time)} and has not
+            been opened yet.
+          </span>
+          <button
+            onClick={() => setHiddenReminders([...hiddenReminders, r.schedule_id])}
+            className="btn"
+          >
+            Hide
+          </button>
+        </div>
+      ))}
+
+      {/* Alerts: stored in the backend until acknowledged */}
       {alerts.map((a) => (
         <div
-          key={a.key}
+          key={a.id}
           className="mt-3 flex flex-wrap items-center gap-3 border-2 border-red-700 bg-red-50 px-3 py-2"
         >
           <span className="flex-1">
-            <b className="text-red-700">{a.status === "due" ? "DUE NOW:" : "MISSED:"}</b>{" "}
-            {a.medication} in Compartment {withDay(a.compartment)} was scheduled at{" "}
-            {formatTime(a.scheduled_time)} and has NOT been opened.
+            <b className="text-red-700">{statusLabel(a.type).toUpperCase()}:</b> {a.message}{" "}
+            <span className="text-xs text-gray-600">(alert {formatDateTime(a.created_at)})</span>
           </span>
-          <button onClick={() => setDismissed([...dismissed, a.key])} className="btn">
+          <button onClick={() => acknowledge(a.id)} className="btn">
             Acknowledge
           </button>
         </div>

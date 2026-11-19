@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from .alerts import create_event_alert
+from .alerts import router as alerts_router
 from .classify import VERIFIED_STATUSES, WINDOW, classify, doses_near, find_due_dose
 from .db import get_client
 from .models import EventIn
@@ -20,11 +22,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],  # Authorization is for login (next step)
+    allow_headers=["Content-Type", "Authorization"],  # Authorization is for login
 )
 
 app.include_router(reads_router)
 app.include_router(schedules_router)
+app.include_router(alerts_router)
 
 
 @app.get("/health")
@@ -40,7 +43,8 @@ def health_db():
 
 @app.post("/api/events", status_code=status.HTTP_201_CREATED)
 def create_event(event: EventIn):
-    """Receive one lid event from the ESP32, classify it, store it."""
+    """Receive one lid event from the ESP32, classify it, store it, and store
+    an alert if the result needs attention (unexpected_access, needs_confirmation)."""
     db = get_client()
     now = datetime.now(TZ)
 
@@ -54,13 +58,15 @@ def create_event(event: EventIn):
     if not touched.data:
         raise HTTPException(status_code=404, detail=f"Unknown device: {event.device_id}")
 
+    rows = []
     dose = None
     already_verified = False
     if event.lid_open:
         days = list({(now + timedelta(days=o)).weekday() for o in (-1, 0, 1)})
         rows = (
             db.table("medication_schedules")
-            .select("id, compartment, day_of_week, scheduled_time")
+            # medications(display_name) is only for the alert text
+            .select("id, compartment, day_of_week, scheduled_time, medications(display_name)")
             .eq("compartment", event.compartment)
             .in_("day_of_week", days)
             .execute()
@@ -104,4 +110,13 @@ def create_event(event: EventIn):
         "scheduled_time": dose.due_at.isoformat() if dose else None,
         "actual_time": now.isoformat(),
     }
-    return db.table("medication_events").insert(row).execute().data[0]
+    stored = db.table("medication_events").insert(row).execute().data[0]
+
+    # Alert for unexpected_access / needs_confirmation (does nothing for other statuses, and never fails the request: the event is already stored).
+    medication = None
+    if dose is not None:
+        match = next((r for r in rows if r["id"] == dose.schedule_id), None)
+        medication = ((match or {}).get("medications") or {}).get("display_name")
+    create_event_alert(db, stored, medication=medication, repeat=dose is not None and already_verified)
+
+    return stored
