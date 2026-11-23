@@ -332,6 +332,9 @@ export default function Home() {
         <Link href="/schedules" className="btn">
           Schedules
         </Link>
+        <Link href="/history" className="btn">
+          History
+        </Link>
         <span className="ml-auto">
           {userEmail && userEmail + " "}
           <button onClick={logOut} className="btn">
