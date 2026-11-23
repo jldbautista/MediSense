@@ -38,7 +38,7 @@ def _results(days: int, now: datetime) -> list[dict]:
     earliest = doses[0]["due_at"] - DOSE_WINDOW
     events = (
         client.table("medication_events")
-        .select("id, schedule_id, status, actual_time, camera_compartment, camera_confidence")
+        .select("id, schedule_id, status, actual_time, camera_compartment, camera_confidence, source")
         .in_("schedule_id", sorted({d["schedule_id"] for d in doses}))
         .gte("actual_time", earliest.isoformat())
         .order("actual_time")
