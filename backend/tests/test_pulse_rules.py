@@ -7,6 +7,7 @@ a real fingertip pulse: a sharp rise, a slower fall, and a small second bump
 
 import math
 import random
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.pulse_rules import (
     analyze_pulse,
     filter_signal,
     find_peaks,
+    link_event,
     moving_average,
     percentile,
     periodicity,
@@ -244,4 +246,39 @@ def test_too_short_raises():
 def test_bad_sample_rate_raises(rate):
     with pytest.raises(ValueError):
         analyze_pulse([2000] * 10000, rate)
-    
+
+
+# ---- linking a reading to the dose it follows ----
+
+NOW = datetime(2026, 11, 23, 16, 10, tzinfo=timezone.utc)
+
+
+def ev(id, minutes_before, schedule_id=29, status="verified_on_time"):
+    return {"id": id, "schedule_id": schedule_id, "status": status,
+            "actual_time": (NOW - timedelta(minutes=minutes_before)).isoformat()}
+
+
+def test_links_to_recent_dose_event():
+    assert link_event([ev(1, 3)], NOW)["id"] == 1
+
+
+def test_links_to_latest_of_several():
+    assert link_event([ev(1, 12), ev(2, 2), ev(3, 8)], NOW)["id"] == 2
+
+
+def test_no_link_when_too_old():
+    assert link_event([ev(1, 16)], NOW) is None
+
+
+def test_no_link_to_event_after_the_reading():
+    assert link_event([ev(1, -1)], NOW) is None
+
+
+def test_no_link_to_openings_that_are_not_a_dose():
+    # unexpected_access and lid_closed events have no schedule_id
+    events = [ev(1, 2, schedule_id=None, status="unexpected_access"), ev(2, 5)]
+    assert link_event(events, NOW)["id"] == 2
+
+
+def test_no_events_no_link():
+    assert link_event([], NOW) is None

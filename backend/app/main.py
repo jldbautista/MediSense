@@ -14,7 +14,9 @@ from .devices import router as devices_router
 from .models import EventIn
 from .reads import router as reads_router
 from .schedules import router as schedules_router
-from .history import router as history_router      
+from .history import router as history_router
+from .pulse import router as pulse_router
+
 
 TZ = ZoneInfo("America/Los_Angeles")
 
@@ -31,7 +33,8 @@ app.include_router(reads_router)
 app.include_router(schedules_router)
 app.include_router(alerts_router)
 app.include_router(devices_router)
-app.include_router(history_router)              
+app.include_router(history_router)
+app.include_router(pulse_router)              
 
 @app.get("/health")
 def health():

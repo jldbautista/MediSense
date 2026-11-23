@@ -6,6 +6,7 @@ baseline drift -> smooth out fast noise -> find the heartbeat peaks ->
 BPM from the average time between steady peaks -> rate how steady the beats are.
 """
 
+from datetime import datetime, timedelta
 from statistics import median
 
 ADC_MAX = 4095            # ESP32 ADC is 12-bit (0-4095)
@@ -30,6 +31,7 @@ GOOD_PERIODICITY = 0.6    # signal must repeat itself one beat later (autocorrel
 FAIR_PERIODICITY = 0.5
 
 QUALITIES = ("good", "fair", "poor", "no_signal")
+LINK_WINDOW = timedelta(minutes=15)  # a reading belongs to a dose event this recent
 
 
 def moving_average(values: list[float], window: int) -> list[float]:
@@ -196,3 +198,23 @@ def analyze_pulse(samples: list[float], rate_hz: float, adc_max: int = ADC_MAX) 
 
     result.update(bpm=round(bpm), quality=quality, reason=reason)
     return result
+
+
+def _as_datetime(value) -> datetime:
+    """Supabase returns timestamps as ISO strings; tests may pass datetimes."""
+    return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+
+
+def link_event(events: list[dict], measured_at: datetime) -> dict | None:
+    """The dose event a reading follows: the latest event that belongs to a
+    dose (has a schedule_id) within LINK_WINDOW before the reading. Openings
+    that aren't a dose (unexpected_access) and lid closes don't count."""
+    best = None
+    for e in events:
+        if e.get("schedule_id") is None:
+            continue
+        t = _as_datetime(e["actual_time"])
+        if measured_at - LINK_WINDOW <= t <= measured_at:
+            if best is None or t > _as_datetime(best["actual_time"]):
+                best = e
+    return best
