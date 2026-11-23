@@ -16,14 +16,19 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
+#include "driver/rmt_tx.h"
+#include "esp_rom_sys.h"
+#include <stdlib.h>
 
 #include "secrets.h"   // WIFI_SSID, WIFI_PASSWORD, BACKEND_URL
 
 static const char *TAG = "LID_SENSORS";
 static const char *NET_TAG = "NETWORK";
 static const char *CAM_TAG = "CAMERA";
+static const char *REM_TAG = "REMINDER";
 
 #define DEVICE_ID "medstation01"
+#define FIRMWARE_VERSION "0.4.0"
 
 // One entry per lid, left to right
 // Reed switch between the pin and GND, internal pull up: magnet near (closed) = LOW, magnet away (open) = HIGH.
@@ -76,6 +81,39 @@ static const lid_cfg_t LIDS[] = {
 // No camera message (heartbeat every ~4 s) for this long = link lost.
 #define CAM_LINK_TIMEOUT_MS 10000
 
+// Heartbeat (POST /api/devices/heartbeat). The reply lists the compartments with a dose due
+#define HEARTBEAT_INTERVAL_MS 30000
+
+// No successful heartbeat for this long = forget the due list (stops buzzing while offline)
+#define DUE_STALE_MS 120000
+#define HTTP_RESPONSE_MAX 1024
+
+// Buzzer: active buzzer module (VCC to 3.3 V, GND, I/O to D27).
+#define BUZZER_PIN GPIO_NUM_27
+#define BUZZER_ACTIVE_LOW 1
+
+// Beep pattern while a dose is due: beep, pause, beep, then quiet, repeating.
+#define BEEP_ON_MS 150
+#define BEEP_GAP_MS 150
+#define BEEP_QUIET_MS 2500
+
+// Silence button: tactile button between D4 and GND (internal pull up, pressed = LOW).
+#define BUTTON_PIN GPIO_NUM_4
+#define BUTTON_DEBOUNCE_MS 50
+
+// After Silence, the buzzer stays quiet this long (the LED stays lit) unless a new compartment becomes due.
+#define SNOOZE_MS (10 * 60 * 1000)
+
+// WS2812B compartment LEDs: data D32 -> SN74AHCT125N -> 330 ohm -> strip DIN.
+#define LED_PIN GPIO_NUM_32
+#define LED_COUNT 14              // LEDs on the cut piece
+#define LED_SPACING 2             // light every other LED (60/m strip, ~32 mm compartments)
+#define LED_OFFSET 0              // first lit LED (0 = the LED nearest DIN)
+#define LED_DIN_ON_RIGHT 1        // 1 = DIN end under Sat (7), 0 = DIN end under Sun (1)
+#define LED_BRIGHTNESS 40         // 0..255 cap: kept low for USB power and the camera's locked exposure
+#define FLASH_MS 3000             // green/yellow/red result flash after an opening
+#define REMINDER_TICK_MS 20
+
 typedef struct {
     int compartment;
     int64_t opened_ms;   // when the lid sensor reported OPEN
@@ -97,6 +135,18 @@ static int64_t cam_open_ms[MAX_COMPARTMENT + 1];      // 0 = never seen OPEN
 static float cam_open_margin[MAX_COMPARTMENT + 1];
 static int64_t cam_last_msg_ms = 0;                   // 0 = never heard from camera
 static bool cam_link_up = false;                      // used by uart_task only
+static int cam_last_scan_ms = -1;                     // from the camera's HB line, -1 = none yet
+
+// Reminder state. Written by heartbeat_task / post_task / reminder_task, guarded by ui_lock.
+typedef enum { FLASH_NONE = 0, FLASH_GREEN, FLASH_YELLOW, FLASH_RED } flash_t;
+static SemaphoreHandle_t ui_lock;
+static uint8_t due_mask = 0;                          // bit c = compartment c has a dose due
+static int64_t due_updated_ms = 0;                    // last successful heartbeat
+static uint8_t silenced_mask = 0;                     // due compartments when Silence was pressed
+static int64_t snooze_until_ms = 0;
+static flash_t flash_color[MAX_COMPARTMENT + 1];
+static int64_t flash_until_ms[MAX_COMPARTMENT + 1];
+static TaskHandle_t heartbeat_task_handle = NULL;
 
 static int64_t now_ms(void) {
     return esp_timer_get_time() / 1000;
@@ -142,6 +192,7 @@ static void handle_camera_line(const char *line) {
     if (sscanf(line, "HB,%d", &scan_ms) == 1) {
         xSemaphoreTake(cam_lock, portMAX_DELAY);
         cam_last_msg_ms = t;
+        cam_last_scan_ms = scan_ms;
         xSemaphoreGive(cam_lock);
         if (!cam_link_up) {
             cam_link_up = true;
@@ -303,6 +354,61 @@ static void wifi_init_sta(void) {
 
 /* HTTP POST */
 
+// POST a JSON body. Returns the HTTP status (or -1 on a network error) and copies the start of the reply into resp (always null terminated).
+static int http_post(const char *url, const char *body, char *resp, int resp_size, long long *elapsed_ms) {
+    resp[0] = '\0';
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        ESP_LOGE(NET_TAG, "Could Not Create HTTP Client");
+        return -1;
+    }
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    int64_t start = now_ms();
+    int status = -1;
+    int len = (int)strlen(body);
+    esp_err_t err = esp_http_client_open(client, len);
+    if (err == ESP_OK) {
+        if (esp_http_client_write(client, body, len) == len) {
+            esp_http_client_fetch_headers(client);
+            int n = esp_http_client_read_response(client, resp, resp_size - 1);
+            resp[n > 0 ? n : 0] = '\0';
+            status = esp_http_client_get_status_code(client);
+        } else {
+            ESP_LOGE(NET_TAG, "POST Write Failed");
+        }
+    } else {
+        ESP_LOGE(NET_TAG, "POST failed: %s", esp_err_to_name(err));
+    }
+    *elapsed_ms = (long long)(now_ms() - start);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return status;
+}
+
+// Reads "status":"..." from the stored event the backend returns. Empty if not found.
+static void parse_status(const char *resp, char *out, int out_size) {
+    out[0] = '\0';
+    const char *p = strstr(resp, "\"status\":\"");
+    if (p == NULL) {
+        return;
+    }
+    p += strlen("\"status\":\"");
+    int i = 0;
+    while (p[i] != '\0' && p[i] != '"' && i < out_size - 1) {
+        out[i] = p[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
+static void show_result(int compartment, const char *status);
+
 // cam_comp = 0 means no camera reading: the event is sent lid only.
 static void post_event(int compartment, int cam_comp, float cam_conf) {
     char body[256];
@@ -319,36 +425,362 @@ static void post_event(int compartment, int cam_comp, float cam_conf) {
                  DEVICE_ID, compartment);
     }
 
-    esp_http_client_config_t cfg = {
-        .url = BACKEND_URL,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = HTTP_TIMEOUT_MS,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) {
-        ESP_LOGE(NET_TAG, "Could Not Create HTTP Client");
+    static char resp[HTTP_RESPONSE_MAX];   // only post_task calls this
+    long long elapsed = 0;
+    int status = http_post(BACKEND_URL, body, resp, sizeof(resp), &elapsed);
+
+    if (status == 201) {
+        char result[32];
+        parse_status(resp, result, sizeof(result));
+        ESP_LOGI(NET_TAG, "POST ok: 201 Created (%lld ms), status %s", elapsed,
+                 result[0] ? result : "(not in reply)");
+        show_result(compartment, result);
+    } else if (status == 404) {
+        ESP_LOGW(NET_TAG, "POST returned 404: device_id \"%s\" not in devices table?", DEVICE_ID);
+    } else if (status > 0) {
+        ESP_LOGW(NET_TAG, "POST returned status %d (%lld ms)", status, elapsed);
+    }
+}
+
+/* Reminders: heartbeat, compartment LEDs, buzzer, Silence button */
+
+static char heartbeat_url[160];
+
+static void heartbeat_url_init(void) {
+#ifdef HEARTBEAT_URL
+    snprintf(heartbeat_url, sizeof(heartbeat_url), "%s", HEARTBEAT_URL);
+#else
+    const char *suffix = "/api/events";
+    size_t n = strlen(BACKEND_URL), m = strlen(suffix);
+    if (n > m && strcmp(BACKEND_URL + n - m, suffix) == 0) {
+        snprintf(heartbeat_url, sizeof(heartbeat_url), "%.*s/api/devices/heartbeat",
+                 (int)(n - m), BACKEND_URL);
+    } else {
+        heartbeat_url[0] = '\0';
+        ESP_LOGE(REM_TAG, "BACKEND_URL does not end in /api/events: add HEARTBEAT_URL to secrets.h");
+    }
+#endif
+}
+
+// Reads "due_compartments":[4,6] into a bit mask. Returns false if the field is missing.
+static bool parse_due(const char *resp, uint8_t *mask) {
+    const char *p = strstr(resp, "\"due_compartments\":[");
+    if (p == NULL) {
+        return false;
+    }
+    p += strlen("\"due_compartments\":[");
+    uint8_t m = 0;
+    while (*p != '\0' && *p != ']') {
+        char *end = NULL;
+        long c = strtol(p, &end, 10);
+        if (end == p) {
+            p++;              // skip ',' or spaces
+            continue;
+        }
+        if (c >= 1 && c <= MAX_COMPARTMENT) {
+            m |= (uint8_t)(1u << c);
+        }
+        p = end;
+    }
+    *mask = m;
+    return true;
+}
+
+static void log_mask(const char *prefix, uint8_t mask) {
+    char text[32] = {0};
+    int len = 0;
+    for (int c = 1; c <= MAX_COMPARTMENT; c++) {
+        if (mask & (1u << c)) {
+            len += snprintf(text + len, sizeof(text) - len, "%s%d", len ? "," : "", c);
+        }
+    }
+    ESP_LOGI(REM_TAG, "%s %s", prefix, len ? text : "none");
+}
+
+// Ask heartbeat_task to send a heartbeat now (e.g. right after a dose was taken).
+static void heartbeat_now(void) {
+    if (heartbeat_task_handle != NULL) {
+        xTaskNotifyGive(heartbeat_task_handle);
+    }
+}
+
+static void heartbeat_task(void *arg) {
+    (void)arg;
+    static char resp[HTTP_RESPONSE_MAX];
+    char body[320];
+    while (1) {
+        if (heartbeat_url[0] != '\0' && (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT)) {
+            int64_t t = now_ms();
+
+            xSemaphoreTake(cam_lock, portMAX_DELAY);
+            int64_t cam_last = cam_last_msg_ms;
+            int scan_ms = cam_last_scan_ms;
+            xSemaphoreGive(cam_lock);
+            bool link = cam_last > 0 && (t - cam_last) <= CAM_LINK_TIMEOUT_MS;
+
+            int rssi = 0;
+            wifi_ap_record_t ap;
+            bool have_rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+            if (have_rssi) {
+                rssi = ap.rssi;
+            }
+
+            // lids: index 0 = compartment 1 (Sun) ... index 6 = compartment 7 (Sat); 1 = open
+            char lids[32];
+            int len = snprintf(lids, sizeof(lids), "[");
+            for (int i = 0; i < NUM_LIDS; i++) {
+                int open = LIDS[i].enabled && stable_state[i] != LEVELS_WHEN_CLOSED;
+                len += snprintf(lids + len, sizeof(lids) - len, "%s%d", i ? "," : "", open);
+            }
+            snprintf(lids + len, sizeof(lids) - len, "]");
+
+            len = snprintf(body, sizeof(body),
+                           "{\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"uptime_s\":%lld,"
+                           "\"camera_link\":%s,\"lids\":%s",
+                           DEVICE_ID, FIRMWARE_VERSION, (long long)(t / 1000),
+                           link ? "true" : "false", lids);
+            if (have_rssi) {
+                len += snprintf(body + len, sizeof(body) - len, ",\"wifi_rssi\":%d", rssi);
+            }
+            if (link && scan_ms >= 0) {
+                len += snprintf(body + len, sizeof(body) - len, ",\"camera_scan_ms\":%d", scan_ms);
+            }
+            snprintf(body + len, sizeof(body) - len, "}");
+
+            long long elapsed = 0;
+            int status = http_post(heartbeat_url, body, resp, sizeof(resp), &elapsed);
+            uint8_t mask = 0;
+            if (status == 200 && parse_due(resp, &mask)) {
+                xSemaphoreTake(ui_lock, portMAX_DELAY);
+                uint8_t old = due_mask;
+                due_mask = mask;
+                due_updated_ms = now_ms();
+                silenced_mask &= mask;      // forget silences for doses that are no longer due
+                xSemaphoreGive(ui_lock);
+                if (mask != old) {
+                    log_mask("Due Now:", mask);
+                }
+                ESP_LOGD(REM_TAG, "Heartbeat ok (%lld ms)", elapsed);
+            } else if (status == 404) {
+                ESP_LOGW(REM_TAG, "Heartbeat 404: is migration 005 applied and the backend restarted?");
+            } else if (status > 0) {
+                ESP_LOGW(REM_TAG, "Heartbeat returned status %d (%lld ms)", status, elapsed);
+            }
+        }
+        // Wait for the next interval, or wake early when heartbeat_now() is called.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
+    }
+}
+
+// Called by post_task with the backend's result for an opening.
+static void show_result(int compartment, const char *status) {
+    flash_t color = FLASH_NONE;
+    bool counts_as_taken = false;
+    if (strncmp(status, "verified", 8) == 0) {
+        color = FLASH_GREEN;
+        counts_as_taken = true;
+    } else if (strcmp(status, "needs_confirmation") == 0) {
+        color = FLASH_YELLOW;
+        counts_as_taken = true;     // the backend stops reminding for it too
+    } else if (strcmp(status, "unexpected_access") == 0) {
+        color = FLASH_RED;
+    }
+    if (color == FLASH_NONE || compartment < 1 || compartment > MAX_COMPARTMENT) {
         return;
     }
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body, (int)strlen(body));
-
-    int64_t start = now_ms();
-    esp_err_t err = esp_http_client_perform(client);
-    long long elapsed = (long long)(now_ms() - start);
-
-    if (err == ESP_OK) {
-        int status = esp_http_client_get_status_code(client);
-        if (status == 201) {
-            ESP_LOGI(NET_TAG, "POST ok: 201 Created (%lld ms)", elapsed);
-        } else if (status == 404) {
-            ESP_LOGW(NET_TAG, "POST returned 404: device_id \"%s\" not in devices table?", DEVICE_ID);
-        } else {
-            ESP_LOGW(NET_TAG, "POST returned status %d (%lld ms)", status, elapsed);
-        }
-    } else {
-        ESP_LOGE(NET_TAG, "POST failed: %s (%lld ms)", esp_err_to_name(err), elapsed);
+    xSemaphoreTake(ui_lock, portMAX_DELAY);
+    flash_color[compartment] = color;
+    flash_until_ms[compartment] = now_ms() + FLASH_MS;
+    if (counts_as_taken) {
+        due_mask &= (uint8_t)~(1u << compartment);   // stop at once; the next heartbeat confirms
     }
-    esp_http_client_cleanup(client);
+    xSemaphoreGive(ui_lock);
+    if (counts_as_taken) {
+        heartbeat_now();
+    }
+}
+
+/* WS2812B over RMT (10 MHz: 1 tick = 0.1 us) */
+
+static rmt_channel_handle_t led_chan = NULL;
+static rmt_encoder_handle_t led_encoder = NULL;
+static uint8_t led_buf[LED_COUNT * 3];   // G, R, B per LED
+
+static void leds_init(void) {
+    rmt_tx_channel_config_t chan_cfg = {
+        .gpio_num = LED_PIN,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .mem_block_symbols = 64,
+        .trans_queue_depth = 4,
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&chan_cfg, &led_chan));
+    rmt_bytes_encoder_config_t enc_cfg = {
+        .bit0 = {.level0 = 1, .duration0 = 3, .level1 = 0, .duration1 = 9},   // 0.3 us high, 0.9 us low
+        .bit1 = {.level0 = 1, .duration0 = 9, .level1 = 0, .duration1 = 3},   // 0.9 us high, 0.3 us low
+        .flags.msb_first = 1,
+    };
+    ESP_ERROR_CHECK(rmt_new_bytes_encoder(&enc_cfg, &led_encoder));
+    ESP_ERROR_CHECK(rmt_enable(led_chan));
+}
+
+static void leds_show(void) {
+    rmt_transmit_config_t tx_cfg = {.loop_count = 0};
+    if (rmt_transmit(led_chan, led_encoder, led_buf, sizeof(led_buf), &tx_cfg) == ESP_OK) {
+        rmt_tx_wait_all_done(led_chan, pdMS_TO_TICKS(100));
+    }
+    esp_rom_delay_us(80);   // WS2812B latch/reset time (> 50 us low)
+}
+
+static int led_index(int compartment) {
+    int pos = LED_DIN_ON_RIGHT ? (MAX_COMPARTMENT - compartment) : (compartment - 1);
+    return LED_OFFSET + LED_SPACING * pos;
+}
+
+// r, g, b are 0..255 before the brightness cap.
+static void led_set(int compartment, uint8_t r, uint8_t g, uint8_t b) {
+    int i = led_index(compartment);
+    if (i < 0 || i >= LED_COUNT) {
+        return;
+    }
+    led_buf[i * 3 + 0] = (uint8_t)(g * LED_BRIGHTNESS / 255);
+    led_buf[i * 3 + 1] = (uint8_t)(r * LED_BRIGHTNESS / 255);
+    led_buf[i * 3 + 2] = (uint8_t)(b * LED_BRIGHTNESS / 255);
+}
+
+static void buzzer_set(bool on) {
+    gpio_set_level(BUZZER_PIN, on ? !BUZZER_ACTIVE_LOW : BUZZER_ACTIVE_LOW);
+}
+
+static void reminder_hw_init(void) {
+    gpio_config_t out_cfg = {
+        .pin_bit_mask = 1ULL << BUZZER_PIN,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&out_cfg));
+    buzzer_set(false);
+
+    gpio_config_t in_cfg = {
+        .pin_bit_mask = 1ULL << BUTTON_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&in_cfg));
+
+    leds_init();
+    memset(led_buf, 0, sizeof(led_buf));
+    leds_show();
+}
+
+// Boot check: each compartment LED lights blue from Sun to Sat, then one short beep.
+// Confirms the strip, the LED mapping and the buzzer every time the station starts.
+static void reminder_self_test(void) {
+    for (int c = 1; c <= MAX_COMPARTMENT; c++) {
+        memset(led_buf, 0, sizeof(led_buf));
+        led_set(c, 0, 0, 255);
+        leds_show();
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+    memset(led_buf, 0, sizeof(led_buf));
+    leds_show();
+    buzzer_set(true);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    buzzer_set(false);
+    ESP_LOGI(REM_TAG, "Self Test Done: LEDs Sun to Sat, one beep");
+}
+
+// Drives the LEDs and buzzer from due_mask, the result flashes, and the Silence button.
+static void reminder_task(void *arg) {
+    (void)arg;
+    int last_button = 1;
+    int stable_button = 1;
+    int64_t button_change_ms = 0;
+    int64_t beep_cycle_start = 0;
+    bool was_buzzing = false;
+    bool was_stale = false;
+    uint8_t last_leds_key[LED_COUNT * 3] = {0};
+
+    while (1) {
+        int64_t t = now_ms();
+
+        // Silence button (debounced, acts on press)
+        int b = gpio_get_level(BUTTON_PIN);
+        if (b != last_button) {
+            last_button = b;
+            button_change_ms = t;
+        }
+        if (t - button_change_ms > BUTTON_DEBOUNCE_MS && b != stable_button) {
+            stable_button = b;
+            if (stable_button == 0) {
+                xSemaphoreTake(ui_lock, portMAX_DELAY);
+                silenced_mask = due_mask;
+                snooze_until_ms = t + SNOOZE_MS;
+                uint8_t m = due_mask;
+                xSemaphoreGive(ui_lock);
+                if (m) {
+                    ESP_LOGI(REM_TAG, "Silence Pressed: buzzer quiet for %d min (LED stays on)", SNOOZE_MS / 60000);
+                } else {
+                    ESP_LOGI(REM_TAG, "Silence Pressed (nothing due)");
+                }
+            }
+        }
+
+        // Snapshot the shared state
+        xSemaphoreTake(ui_lock, portMAX_DELAY);
+        bool stale = due_updated_ms == 0 || (t - due_updated_ms) > DUE_STALE_MS;
+        uint8_t due = stale ? 0 : due_mask;
+        uint8_t silenced = silenced_mask;
+        bool snoozed = t < snooze_until_ms;
+        flash_t flash[MAX_COMPARTMENT + 1];
+        for (int c = 1; c <= MAX_COMPARTMENT; c++) {
+            flash[c] = (t < flash_until_ms[c]) ? flash_color[c] : FLASH_NONE;
+        }
+        xSemaphoreGive(ui_lock);
+
+        if (stale && !was_stale && due_updated_ms != 0) {
+            ESP_LOGW(REM_TAG, "No Heartbeat Reply for %d s: reminders paused until the backend answers", DUE_STALE_MS / 1000);
+        }
+        was_stale = stale;
+
+        // LEDs: result flash wins, otherwise blue while due
+        memset(led_buf, 0, sizeof(led_buf));
+        for (int c = 1; c <= MAX_COMPARTMENT; c++) {
+            if (flash[c] == FLASH_GREEN) {
+                led_set(c, 0, 255, 0);
+            } else if (flash[c] == FLASH_YELLOW) {
+                led_set(c, 255, 140, 0);
+            } else if (flash[c] == FLASH_RED) {
+                led_set(c, 255, 0, 0);
+            } else if (due & (1u << c)) {
+                led_set(c, 0, 0, 255);
+            }
+        }
+        if (memcmp(led_buf, last_leds_key, sizeof(led_buf)) != 0) {
+            leds_show();
+            memcpy(last_leds_key, led_buf, sizeof(led_buf));
+        }
+
+        // Buzzer: beeps while something is due, unless silenced (a newly due compartment or the end of the snooze starts it again)
+        bool new_due = (due & (uint8_t)~silenced) != 0;
+        bool buzzing = due != 0 && (new_due || !snoozed);
+        if (buzzing && !was_buzzing) {
+            beep_cycle_start = t;
+        }
+        was_buzzing = buzzing;
+        bool on = false;
+        if (buzzing) {
+            int64_t phase = (t - beep_cycle_start) % (2 * BEEP_ON_MS + BEEP_GAP_MS + BEEP_QUIET_MS);
+            on = phase < BEEP_ON_MS || (phase >= BEEP_ON_MS + BEEP_GAP_MS && phase < 2 * BEEP_ON_MS + BEEP_GAP_MS);
+        }
+        buzzer_set(on);
+
+        vTaskDelay(pdMS_TO_TICKS(REMINDER_TICK_MS));
+    }
 }
 
 // Runs separately from the lid loop, so waiting for the camera or a slow network never delays lid polling. 
@@ -423,8 +855,8 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "--- MediSense: Reed Rail (7 lids) + Camera UART + Wi-Fi + HTTP POST (re-arm %d ms, camera wait %d ms) ---",
-             REARM_CLOSED_MS, CAMERA_WAIT_MS);
+    ESP_LOGI(TAG, "--- MediSense v%s: 7 Lids + Camera UART + Wi-Fi + Events + Heartbeat + Reminders (re-arm %d ms, camera wait %d ms) ---",
+             FIRMWARE_VERSION, REARM_CLOSED_MS, CAMERA_WAIT_MS);
 
     // Reed rail has no external resistors
     uint64_t pin_mask = 0;
@@ -445,18 +877,25 @@ void app_main(void) {
     }
 
     cam_lock = xSemaphoreCreateMutex();
+    ui_lock = xSemaphoreCreateMutex();
+    reminder_hw_init();
+    reminder_self_test();
     camera_uart_init();
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
 
     event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(lid_event_t));
     wifi_init_sta();
     xTaskCreate(post_task, "post_task", 6144, NULL, 5, NULL);
+    heartbeat_url_init();
+    xTaskCreate(heartbeat_task, "heartbeat_task", 6144, NULL, 4, &heartbeat_task_handle);
+    xTaskCreate(reminder_task, "reminder_task", 4096, NULL, 4, NULL);
 
     EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT,
                                            pdFALSE, pdTRUE,
                                            pdMS_TO_TICKS(WIFI_WAIT_AT_BOOT_MS));
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(NET_TAG, "Backend URL: %s", BACKEND_URL);
+        ESP_LOGI(NET_TAG, "Heartbeat URL: %s (every %d s)", heartbeat_url, HEARTBEAT_INTERVAL_MS / 1000);
     } else {
         ESP_LOGW(NET_TAG, "No Wi-Fi yet. Lids still work; will keep retrying.");
     }
